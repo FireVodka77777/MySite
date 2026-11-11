@@ -1,0 +1,1080 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PROJECT LABYRINTH — 4x4 Procedural</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: 'Georgia', serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  .vhs-overlay {
+    position: absolute; inset: 0; pointer-events: none; z-index: 40;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,0.06), rgba(0,0,0,0.06) 1px, transparent 1px, transparent 2px);
+    mix-blend-mode: multiply;
+  }
+
+  .hud {
+    position: absolute; top: 30px; left: 30px; right: 30px;
+    display: flex; justify-content: space-between;
+    pointer-events: none; z-index: 10; color: #e0e0e0;
+    font-family: 'Courier New', monospace;
+  }
+  .hud-item {
+    background: rgba(10, 15, 20, 0.6); padding: 10px 15px; 
+    border-left: 3px solid #00f0ff; font-size: 14px;
+    backdrop-filter: blur(4px);
+  }
+  .hud-item.active { border-left-color: #00f0ff; }
+  .status-text { font-size: 11px; color: #88a; margin-top: 5px; display: block; }
+  
+  .noise-bar { width: 120px; height: 6px; background: #333; margin-top: 6px; border-radius: 3px; overflow: hidden; }
+  .noise-fill { height: 100%; width: 0%; background: #ffcc00; transition: width 0.1s, background 0.3s; }
+
+  #fade {
+    position: absolute; inset: 0; background: #000; opacity: 0;
+    pointer-events: none; transition: opacity 0.3s; z-index: 50;
+  }
+
+  .overlay {
+    position: absolute; inset: 0; background: rgba(5, 8, 10, 0.95);
+    display: grid; place-items: center; text-align: center; z-index: 100;
+    color: #e0e0e0; transition: opacity 0.5s;
+    font-family: 'Courier New', monospace;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .overlay h1 { font-size: 3rem; color: #fff; letter-spacing: 8px; margin-bottom: 20px; text-shadow: 0 0 10px rgba(255,255,255,0.5); font-family: 'Georgia', serif; }
+  .overlay p { color: #aab; line-height: 1.8; margin-bottom: 30px; }
+  .overlay kbd { background: #222; border: 1px solid #556; padding: 3px 8px; border-radius: 4px; color: #fff; }
+  .overlay button {
+    background: #111; color: #fff; border: 1px solid #556;
+    padding: 15px 40px; font-size: 1.2rem; font-family: inherit;
+    cursor: pointer; letter-spacing: 2px; transition: 0.2s;
+  }
+  .overlay button:hover { background: #333; box-shadow: 0 0 20px rgba(255,255,255,0.2); border-color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="vhs-overlay"></div>
+
+<div class="hud">
+  <div class="hud-item active" id="playerHud">
+    SUBJECT: <span id="playerName" style="color:#fff">ETHAN</span><br>
+    <span class="status-text" id="playerStatus">STOPPED</span>
+    <div class="noise-bar"><div class="noise-fill" id="noiseFill"></div></div>
+  </div>
+  <div class="hud-item">
+    <span class="status-text" id="roomName" style="color:#00f0ff; font-size:13px;">СЕКТОР А: ВХОД</span>
+    <span class="status-text" id="hintText">E — Взаимодействие</span>
+  </div>
+</div>
+
+<div id="fade"></div>
+
+<div class="overlay" id="overlay">
+  <div>
+    <h1>PROJECT: LABYRINTH</h1>
+    <p>
+      Сектор 7. Уровень биологической изоляции.<br>
+      <b style="color:#00f0ff">Планировка меняется каждый раз.</b><br><br>
+      <kbd>A</kbd> <kbd>D</kbd> — Движение<br>
+      <kbd>Shift</kbd> — Красться<br>
+      <kbd>Пробел</kbd> — Бежать / Прыжок (Чеби)<br>
+      <kbd>E</kbd> — Взаимодействие / Взлом / Вход<br>
+      <kbd>Q</kbd> — Сменить персонажа<br>
+      <kbd>C</kbd> — Вызвать Чеби (за Мию)
+    </p>
+    <button id="startBtn">СГЕНЕРИРОВАТЬ СЕКТОР</button>
+  </div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const fadeEl = document.getElementById('fade');
+  const roomNameEl = document.getElementById('roomName');
+  const hintTextEl = document.getElementById('hintText');
+  
+  const playerNameEl = document.getElementById('playerName');
+  const playerHudEl = document.getElementById('playerHud');
+  const playerStatusEl = document.getElementById('playerStatus');
+  const noiseFillEl = document.getElementById('noiseFill');
+
+  const darkCanvas = document.createElement('canvas');
+  const darkCtx = darkCanvas.getContext('2d');
+
+  let audioCtx = null;
+  function initAudio() {
+    try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+  }
+  function playTone(type, fS, fE, dur, vol=0.1) {
+    if (!audioCtx) return;
+    try {
+      const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.type = type; osc.frequency.setValueAtTime(fS, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(fE, audioCtx.currentTime + dur);
+      gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+      osc.start(); osc.stop(audioCtx.currentTime + dur);
+    } catch(e) {}
+  }
+  const playStep = (v=0.1) => playTone('triangle', 120 + Math.random()*40, 40, 0.08, v);
+  const playDoor = () => playTone('sawtooth', 80, 40, 0.4, 0.2);
+  const playHackSuccess = () => playTone('sine', 600, 800, 0.15, 0.1);
+  const playHackFail = () => playTone('square', 150, 50, 0.2, 0.2);
+  const playItem = () => playTone('sine', 800, 1200, 0.3, 0.1);
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    darkCanvas.width = canvas.width;
+    darkCanvas.height = canvas.height;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const FLOOR_Y = 600;
+  const WORLD_END_X = 3000;
+
+  // ==========================================
+  // ГЕНЕРАТОР ПРОЦЕДУРНЫХ УРОВНЕЙ 4x4 (ROGUE-LITE)
+  // ==========================================
+  let roomsData = {};
+
+  function generateLevel() {
+    roomsData = {};
+    const gridSize = 4;
+
+    // 1. Создаем пустую сетку 4x4
+    const grid = Array(gridSize).fill(null).map(() => Array(gridSize).fill(null));
+    
+    // 2. Генерация главного пути (Random Walk с приоритетом вправо)
+    let cx = 0, cy = Math.floor(Math.random() * gridSize); 
+    grid[cy][cx] = 'start';
+    const path = [{x: cx, y: cy}];
+
+    while (cx < gridSize - 1) {
+      // Возможные шаги
+      let moves = [{x: cx+1, y: cy, dir: 'right'}]; 
+      if (cy > 0) moves.push({x: cx, y: cy-1, dir: 'up'});
+      if (cy < gridSize-1) moves.push({x: cx, y: cy+1, dir: 'down'});
+
+      // Фильтруем уже посещенные
+      moves = moves.filter(m => grid[m.y][m.x] === null);
+      
+      // Приоритет: Вправо (60%), вверх/вниз (40%)
+      let chosenMove;
+      const rightMove = moves.find(m => m.dir === 'right');
+      if (rightMove && Math.random() < 0.6) {
+        chosenMove = rightMove;
+      } else {
+        const sideMoves = moves.filter(m => m.dir !== 'right');
+        if (sideMoves.length > 0) chosenMove = sideMoves[Math.floor(Math.random() * sideMoves.length)];
+        else chosenMove = rightMove; // Если боковых нет, идем вправо
+      }
+
+      if (chosenMove) {
+        cx = chosenMove.x; cy = chosenMove.y;
+        grid[cy][cx] = 'path';
+        path.push({x: cx, y: cy});
+      } else {
+        // Защита от зависания (не должно случиться, но на всякий случай)
+        cx++;
+        grid[cy][cx] = 'path';
+        path.push({x: cx, y: cy});
+      }
+    }
+    grid[cy][cx] = 'exit'; // Последняя точка пути — выход
+
+    // 3. Генерация веток (тупиков)
+    const branchChance = 0.3;
+    let branchCount = 0;
+    const maxBranches = 3;
+
+    for (let i = 0; i < path.length; i++) {
+      if (branchCount >= maxBranches) break;
+      const p = path[i];
+
+      const neighbors = [
+        {x: p.x, y: p.y-1}, {x: p.x, y: p.y+1}, 
+        {x: p.x-1, y: p.y}, {x: p.x+1, y: p.y}
+      ];
+
+      // Перемешиваем соседей
+      neighbors.sort(() => Math.random() - 0.5);
+
+      for (let n of neighbors) {
+        if (n.x >= 0 && n.x < gridSize && n.y >= 0 && n.y < gridSize && grid[n.y][n.x] === null) {
+          if (Math.random() < branchChance) {
+            grid[n.y][n.x] = 'branch';
+            branchCount++;
+            break; // Одна ветка на узел пути
+          }
+        }
+      }
+    }
+
+    // 4. Превращаем сетку в объекты комнат
+    let hasOffice = false;
+
+    for (let y = 0; y < gridSize; y++) {
+      for (let x = 0; x < gridSize; x++) {
+        const type = grid[y][x];
+        if (!type) continue;
+
+        const id = `room_${x}_${y}`;
+        let name = 'КОРИДОР';
+        let width = 1600;
+        let decor = [];
+        
+        if (type === 'start') { name = 'ПОСТ ОХРАНЫ'; width = 800; }
+        else if (type === 'exit') { name = 'СЕКТОР ВЫХОДА'; width = 1200; }
+        else if (type === 'branch') { 
+            if (!hasOffice && Math.random() > 0.5) {
+                name = 'ОФИС'; width = 1000; hasOffice = true;
+                decor.push({ type: 'desk', x: 300, y: FLOOR_Y - 40, w: 120, h: 40, layer: 'mid' });
+            } else {
+                name = 'СКЛАД'; width = 1000; 
+                decor.push({ type: 'crate', x: 300, y: FLOOR_Y - 60, w: 60, h: 60, layer: 'mid' });
+            }
+        }
+        else if (type === 'path') {
+            // Если это центр карты (1,1), (2,1) и т.д. можем сделать Холлом
+            if ((x === 1 || x === 2) && (y === 1 || y === 2)) name = 'ГЛАВНЫЙ ХОЛЛ'; 
+            else name = 'КОРИДОР';
+        }
+
+        // Гарантируем, что Офис есть в игре (иначе Чеби бесполезен)
+        if (!hasOffice && type === 'branch') {
+            name = 'ОФИС'; hasOffice = true;
+            decor = [{ type: 'desk', x: 300, y: FLOOR_Y - 40, w: 120, h: 40, layer: 'mid' }];
+        }
+
+        roomsData[id] = {
+          id: id, name: name, type: type, mapX: x, mapY: y,
+          walls: [ { x: 0, y: 0, w: 40, h: FLOOR_Y }, { x: width, y: 0, w: 40, h: FLOOR_Y } ],
+          width: width, platforms: [], vents: [], smallHoles: [], items: [], doors: [], decor: decor
+        };
+      }
+    }
+
+    // Финальный фикс: если Офиса так и не появилось (маловероятно), делаем последний коридор Офисом
+    if (!hasOffice) {
+        for (let id in roomsData) {
+            if (roomsData[id].type === 'path') {
+                roomsData[id].name = 'ОФИС';
+                roomsData[id].decor.push({ type: 'desk', x: 300, y: FLOOR_Y - 40, w: 120, h: 40, layer: 'mid' });
+                break;
+            }
+        }
+    }
+
+    // 5. Автоматическая генерация дверей
+    for (let y = 0; y < gridSize; y++) {
+      for (let x = 0; x < gridSize; x++) {
+        const room = roomsData[`room_${x}_${y}`];
+        if (!room) continue;
+
+        const w = room.width;
+
+        // Дверь ВЛЕВО
+        if (x > 0 && roomsData[`room_${x-1}_${y}`]) {
+          room.doors.push({
+            id: 'left', x: 40, y: FLOOR_Y - 160, w: 80, h: 160,
+            target: `room_${x-1}_${y}`, spawnX: roomsData[`room_${x-1}_${y}`].width - 150,
+            isOpen: false, isHacked: true, requiresHack: false, label: roomsData[`room_${x-1}_${y}`].name
+          });
+        }
+
+        // Дверь ВПРАВО
+        if (x < gridSize - 1 && roomsData[`room_${x+1}_${y}`]) {
+          room.doors.push({
+            id: 'right', x: w - 120, y: FLOOR_Y - 160, w: 80, h: 160,
+            target: `room_${x+1}_${y}`, spawnX: 150,
+            isOpen: false, isHacked: true, requiresHack: (Math.random() > 0.5),
+            label: roomsData[`room_${x+1}_${y}`].name
+          });
+        }
+
+        // Переход ВНИЗ
+        if (y < gridSize - 1 && roomsData[`room_${x}_${y+1}`]) {
+          room.doors.push({
+            id: 'down', x: w / 2 - 75, y: FLOOR_Y - 40, w: 150, h: 40,
+            target: `room_${x}_${y+1}`, spawnX: roomsData[`room_${x}_${y+1}`].width / 2,
+            isDepth: true, label: 'ВНИЗ'
+          });
+        }
+
+        // Переход ВВЕРХ
+        if (y > 0 && roomsData[`room_${x}_${y-1}`]) {
+          room.doors.push({
+            id: 'up', x: w / 2 - 75, y: FLOOR_Y - 40, w: 150, h: 40,
+            target: `room_${x}_${y-1}`, spawnX: roomsData[`room_${x}_${y-1}`].width / 2,
+            isDepth: true, label: 'ВВЕРХ'
+          });
+        }
+
+        // Если это выход - добавляем финальную дверь
+        if (room.type === 'exit') {
+          room.doors.push({
+            id: 'exit', x: w - 120, y: FLOOR_Y - 160, w: 80, h: 160,
+            target: 'win', spawnX: 0, isOpen: false, isHacked: false, requiresHack: true, label: 'ПОБЕГ'
+          });
+        }
+
+        // Если это Офис, добавляем вентиляцию для Чеби
+        if (room.name === 'ОФИС') {
+            room.smallHoles.push({ x: 80, y: 400, w: 40, h: 60 });
+        }
+      }
+    }
+  }
+
+  // Добавляем скрытую комнату Чеби
+  roomsData['chibi_vent'] = {
+    name: 'ВЕНТИЛЯЦИЯ', mapX: -1, mapY: -1,
+    walls: [ { x: 0, y: 0, w: 40, h: 800 }, { x: 900, y: 0, w: 40, h: 800 } ],
+    platforms: [
+      { x: 100, y: 540, w: 100, h: 20 }, { x: 240, y: 470, w: 100, h: 20 },
+      { x: 380, y: 400, w: 100, h: 20 }, { x: 520, y: 330, w: 100, h: 20 },
+      { x: 660, y: 260, w: 100, h: 20 }
+    ],
+    vents: [], smallHoles: [], items: [ { type: 'keycard', x: 690, y: 230, w: 20, h: 15, collected: false } ],
+    doors: [], decor: []
+  };
+
+
+  const state = {
+    running: false, activePlayer: 'ethan', playerOrder: ['ethan', 'mia'],
+    chibiSpawned: false, hasKeycard: false, currentRoomId: 'room_0_1',
+    inVent: false, cameraX: 0, cameraY: 0, transitioning: false,
+    time: 0, noiseLevel: 0, camShake: 0, particles: [],
+    hacking: { active: false, progress: 0, maxProgress: 3, angle: 0, speed: 3.5, dir: 1, targetAngle: 0, targetWidth: 0.8, doorRef: null, flashTimer: 0, flashColor: null }
+  };
+
+  const keys = {};
+
+  const players = {
+    ethan: { x: 100, y: FLOOR_Y - 65, w: 34, h: 65, vx: 0, vy: 0, speed: 220, runSpeed: 400, sneakSpeed: 90, color: '#ffffff', name: 'ETHAN', dir: 1, isChibi: false, animTime: 0 },
+    mia:   { x: 150, y: FLOOR_Y - 65, w: 34, h: 65, vx: 0, vy: 0, speed: 240, runSpeed: 440, sneakSpeed: 100, color: '#ffccff', name: 'MIA', dir: 1, isChibi: false, animTime: 0 },
+    chibi: { x: 200, y: FLOOR_Y - 30, w: 20, h: 30, vx: 0, vy: 0, speed: 220, runSpeed: 220, sneakSpeed: 80, color: '#ffff00', name: 'CHIBI', dir: 1, isChibi: true, animTime: 0 }
+  };
+
+  let currentWalls = [], currentPlatforms = [], currentVents = [], currentSmallHoles = [], currentItems = [], currentDoors = [], currentDecor = [], currentRoomWidth = 2000;
+
+  function loadRoom(roomId, spawnX) {
+    const room = roomsData[roomId];
+    if (!room) return;
+
+    state.currentRoomId = roomId;
+    currentWalls = room.walls;
+    currentPlatforms = room.platforms || [];
+    currentVents = room.vents || [];
+    currentSmallHoles = room.smallHoles || [];
+    currentItems = room.items || [];
+    currentDoors = room.doors || [];
+    currentDecor = room.decor || [];
+    roomNameEl.textContent = room.name;
+
+    currentRoomWidth = room.width;
+
+    const p = players[state.activePlayer];
+    p.x = spawnX || 100;
+    p.y = FLOOR_Y - p.h; 
+    p.vx = 0; p.vy = 0;
+
+    state.playerOrder.forEach((key, idx) => {
+      if (key !== state.activePlayer) {
+        const follower = players[key];
+        const offset = (p.x < currentRoomWidth / 2) ? (60 * (idx + 1)) : (-60 * (idx + 1));
+        follower.x = p.x + offset;
+        follower.y = FLOOR_Y - follower.h;
+        follower.vx = 0; follower.vy = 0;
+      }
+    });
+
+    state.inVent = false;
+    state.hacking.active = false;
+    state.particles = [];
+    state.cameraX = Math.max(0, p.x - canvas.width / 2);
+    state.cameraY = FLOOR_Y - canvas.height + 150;
+    if (state.cameraY < 0) state.cameraY = 0;
+    
+    state.transitioning = true;
+    fadeEl.style.opacity = '1';
+    setTimeout(() => { fadeEl.style.opacity = '0'; state.transitioning = false; }, 150);
+  }
+
+  function spawnChibi() {
+    if (state.chibiSpawned) return;
+    state.chibiSpawned = true;
+    state.playerOrder.push('chibi');
+    const p = players.mia;
+    const c = players.chibi;
+    c.x = p.x - 40; c.y = FLOOR_Y - c.h; c.vx = 0; c.vy = 0;
+    playItem();
+  }
+
+  window.addEventListener('keydown', e => {
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyQ', 'KeyE', 'KeyC', 'ShiftLeft', 'ShiftRight'].includes(e.code)) e.preventDefault();
+    if (!state.running || state.transitioning) return;
+
+    if (state.hacking.active) {
+      if (e.code === 'KeyE') { state.hacking.active = false; }
+      else if (e.code === 'Space' || e.code === 'Enter') { checkHackHit(); }
+      return;
+    }
+
+    if (e.code === 'Escape' && state.currentRoomId === 'chibi_vent') {
+      state.activePlayer = 'mia'; state.chibiSpawned = false; state.playerOrder = ['ethan', 'mia'];
+      let officeId = null;
+      for (const id in roomsData) { if (roomsData[id].name === 'ОФИС') officeId = id; }
+      if (officeId) { loadRoom(officeId, roomsData[officeId].width / 2); }
+      else { loadRoom('room_0_1', 100); }
+      updateHUD(); return;
+    }
+
+    keys[e.code] = true;
+
+    if (e.code === 'KeyC' && state.activePlayer === 'mia') spawnChibi();
+
+    if (e.code === 'KeyQ' && !state.inVent) {
+      let currentIndex = state.playerOrder.indexOf(state.activePlayer);
+      let nextIndex = (currentIndex + 1) % state.playerOrder.length;
+      state.activePlayer = state.playerOrder[nextIndex];
+      updateHUD();
+    }
+
+    if (e.code === 'Space' && !e.repeat && state.activePlayer === 'chibi' && !state.inVent) {
+      const c = players.chibi;
+      let canJump = false;
+      if (c.y + c.h >= FLOOR_Y - 1) canJump = true;
+      else {
+        for (let plat of currentPlatforms) {
+          if (c.x < plat.x + plat.w && c.x + c.w > plat.x && Math.abs((c.y + c.h) - plat.y) < 5) { canJump = true; break; }
+        }
+      }
+      if (canJump) { c.vy = -650; playTone('square', 200, 400, 0.1, 0.05); }
+    }
+
+    if (e.code === 'KeyE') interact();
+  });
+  window.addEventListener('keyup', e => keys[e.code] = false);
+
+  function updateHUD() {
+    const p = players[state.activePlayer];
+    playerNameEl.textContent = p.name;
+    playerNameEl.style.color = p.color;
+    playerHudEl.style.borderLeftColor = p.color;
+  }
+
+  function checkWallCollision(x, y, w, h, isChibi) {
+    for (let wall of currentWalls) {
+      if (x < wall.x + wall.w && x + w > wall.x && y < wall.y + wall.h && y + h > wall.y) return true;
+    }
+    if (!isChibi) {
+      for (let hole of currentSmallHoles) {
+        if (x < hole.x + hole.w && x + w > hole.x && y < hole.y + hole.h && y + h > hole.y) return true;
+      }
+    }
+    return false;
+  }
+
+  function interact() {
+    const p = players[state.activePlayer];
+    if (state.inVent) { state.inVent = false; playerStatusEl.textContent = "STOPPED"; return; }
+
+    if (state.activePlayer === 'mia' && state.chibiSpawned) {
+      for (let hole of currentSmallHoles) {
+        if (Math.abs((p.x + p.w/2) - (hole.x + hole.w/2)) < 120) {
+          state.activePlayer = 'chibi'; updateHUD(); loadRoom('chibi_vent', 70); return;
+        }
+      }
+    }
+
+    if (!p.isChibi) {
+      for (let vent of currentVents) {
+        if (Math.abs((p.x + p.w/2) - (vent.x + vent.w/2)) < 80) {
+          state.inVent = true; p.x = vent.x + vent.w/2 - p.w/2; p.vx = 0;
+          playerStatusEl.textContent = "HIDDEN"; return;
+        }
+      }
+
+      for (let door of currentDoors) {
+        let isNear = false;
+        if (door.isDepth) {
+          if (p.x + p.w/2 > door.x && p.x + p.w/2 < door.x + door.w) isNear = true;
+        } else {
+          if (Math.abs((p.x + p.w/2) - (door.x + door.w/2)) < 120) isNear = true;
+        }
+
+        if (isNear) {
+          if (door.requiresHack && !door.isHacked) {
+            if (state.activePlayer === 'mia') startHacking(door);
+            else { hintTextEl.textContent = "Нужна Мия (Q)"; setTimeout(() => { hintTextEl.textContent = "E — Взаимодействие"; }, 1500); }
+            return;
+          }
+          if (!door.isOpen) { door.isOpen = true; playDoor(); return; }
+          if (door.target === 'win') winGame(); else loadRoom(door.target, door.spawnX);
+          return;
+        }
+      }
+    }
+  }
+
+  function startHacking(door) {
+    state.hacking.active = true; state.hacking.progress = 0; state.hacking.doorRef = door; state.hacking.angle = 0;
+    state.hacking.speed = 3.5; state.hacking.dir = 1; state.hacking.flashTimer = 0;
+    state.hacking.targetAngle = Math.random() * Math.PI * 2; state.hacking.targetWidth = 0.8; 
+    playHackSuccess();
+  }
+
+  function checkHackHit() {
+    const hack = state.hacking;
+    let diff = Math.abs(hack.angle - hack.targetAngle);
+    if (diff > Math.PI) diff = Math.PI * 2 - diff;
+
+    if (diff < hack.targetWidth / 2) {
+      hack.progress++; playHackSuccess(); hack.flashTimer = 0.2; hack.flashColor = '#00ff00';
+      if (hack.progress >= hack.maxProgress) {
+        hack.active = false; hack.doorRef.isHacked = true; hack.doorRef.isOpen = true;
+        playTone('sine', 400, 1000, 0.4, 0.1); playDoor();
+      } else {
+        hack.dir *= -1; hack.speed += 0.5; hack.targetAngle = Math.random() * Math.PI * 2;
+      }
+    } else {
+      playHackFail(); state.camShake = 15; hack.progress = 0; hack.speed = 3.5;
+      hack.flashTimer = 0.2; hack.flashColor = '#ff2e63'; hack.targetAngle = Math.random() * Math.PI * 2;
+    }
+  }
+
+  function updateChibiPhysics(dt) {
+    const c = players.chibi;
+    if (isNaN(c.vx)) c.vx = 0; if (isNaN(c.vy)) c.vy = 0;
+    c.vy += 1500 * dt;
+
+    const nextX = c.x + c.vx * dt;
+    if (!checkWallCollision(nextX, c.y, c.w, c.h, true)) c.x = nextX; else c.vx = 0;
+
+    const nextY = c.y + c.vy * dt;
+    c.onGround = false;
+    if (nextY + c.h > FLOOR_Y) { c.y = FLOOR_Y - c.h; c.vy = 0; c.onGround = true; }
+    else {
+      const prevFeet = c.y + c.h; const nextFeet = nextY + c.h;
+      for (let plat of currentPlatforms) {
+        if (c.vy > 0 && prevFeet <= plat.y && nextFeet >= plat.y && c.x < plat.x + plat.w && c.x + c.w > plat.x) {
+          c.y = plat.y - c.h; c.vy = 0; c.onGround = true; break;
+        }
+      }
+      if (!c.onGround) c.y = nextY;
+    }
+
+    for (let item of currentItems) {
+      if (item.collected) continue;
+      if (c.x < item.x + item.w && c.x + c.w > item.x && c.y < item.y + item.h && c.y + c.h > item.y) {
+        item.collected = true; playItem();
+        state.hasKeycard = true; state.activePlayer = 'mia'; 
+        state.chibiSpawned = false; state.playerOrder = ['ethan', 'mia'];
+        updateHUD();
+        
+        let officeId = null;
+        for (const id in roomsData) { if (roomsData[id].name === 'ОФИС') officeId = id; }
+        if (officeId) { loadRoom(officeId, roomsData[officeId].width / 2); }
+        else { loadRoom('room_0_1', 100); }
+        
+        hintTextEl.textContent = "КЛЮЧ-КАРТА ПОЛУЧЕНА!";
+        setTimeout(() => { hintTextEl.textContent = "E — Взаимодействие"; }, 2000);
+        return;
+      }
+    }
+  }
+
+  function update(dt) {
+    if (!state.running || state.transitioning) return;
+    state.time += dt;
+
+    const p = players[state.activePlayer];
+    if (state.hacking.active) {
+      state.hacking.angle += state.hacking.speed * state.hacking.dir * dt;
+      if (state.hacking.angle > Math.PI * 2) state.hacking.angle -= Math.PI * 2;
+      if (state.hacking.angle < 0) state.hacking.angle += Math.PI * 2;
+      if (state.hacking.flashTimer > 0) state.hacking.flashTimer -= dt;
+      state.camShake *= 0.9; return;
+    }
+
+    if (state.currentRoomId !== 'chibi_vent') {
+      state.playerOrder.forEach(key => {
+        if (key === state.activePlayer || !state.chibiSpawned) return;
+        const follower = players[key];
+        const dist = p.x - follower.x;
+        
+        if (Math.abs(dist) > 250) {
+          follower.x = p.x - Math.sign(dist) * 80;
+        } else if (Math.abs(dist) > 120) {
+          follower.vx = Math.sign(dist) * 150;
+          const nextX = follower.x + follower.vx * dt;
+          if (!checkWallCollision(nextX, follower.y, follower.w, follower.h, false)) {
+            follower.x = nextX;
+          } else {
+            follower.vx = 0; 
+          }
+          follower.animTime += dt * 10;
+        } else {
+          follower.vx = 0;
+        }
+      });
+    }
+
+    let hint = "E — Взаимодействие";
+    if (state.currentRoomId === 'chibi_vent') hint = "SPACE — Прыжок | ESC — Выйти";
+    else if (state.activePlayer === 'mia' && !state.chibiSpawned) hint = "C — Вызвать Чеби";
+    else if (state.activePlayer === 'mia' && state.chibiSpawned && currentSmallHoles.length > 0) {
+      let nearHole = currentSmallHoles.find(h => Math.abs((p.x + p.w/2) - (h.x + h.w/2)) < 120);
+      if (nearHole) hint = "E — Отправить Чеби в шахту";
+    }
+
+    if (!p.isChibi) {
+      for (let door of currentDoors) {
+        let isNear = door.isDepth ? (p.x + p.w/2 > door.x && p.x + p.w/2 < door.x + door.w) : (Math.abs((p.x + p.w/2) - (door.x + door.w/2)) < 120);
+        if (isNear) {
+          if (door.isOpen) hint = door.isDepth ? "E — Войти (Глубина)" : "E — Войти";
+          else if (door.requiresHack && !door.isHacked) hint = state.activePlayer === 'mia' ? "E — Взломать" : "Нужна Мия (Q)";
+          else hint = "E — Открыть";
+          break;
+        }
+      }
+      if (state.inVent) hint = "E — Выйти";
+    }
+    hintTextEl.textContent = hint;
+
+    if (!state.inVent) {
+      const isSneaking = keys['ShiftLeft'] || keys['ShiftRight'];
+      const isRunning = keys['Space'] && !p.isChibi; 
+      let targetSpeed = 0;
+      if (keys['KeyA'] || keys['ArrowLeft']) { targetSpeed = -1; p.dir = -1; }
+      if (keys['KeyD'] || keys['ArrowRight']) { targetSpeed = 1; p.dir = 1; }
+
+      let maxSpeed = p.speed;
+      if (targetSpeed !== 0) {
+        if (isSneaking) maxSpeed = p.sneakSpeed;
+        else if (isRunning) maxSpeed = p.runSpeed;
+      }
+
+      const accel = targetSpeed !== 0 ? 1500 : 2000; 
+      const targetVx = targetSpeed * maxSpeed;
+      if (p.vx < targetVx) p.vx = Math.min(targetVx, p.vx + accel * dt);
+      else if (p.vx > targetVx) p.vx = Math.max(targetVx, p.vx - accel * dt);
+
+      if (Math.abs(p.vx) > 5) {
+        p.animTime += dt * (isRunning ? 18 : isSneaking ? 6 : 12);
+        if (Math.floor(p.animTime * 2) % 2 === 0 && Math.floor(state.time * 10) % 2 === 0) {
+          playStep(isSneaking ? 0.03 : isRunning ? 0.15 : 0.08);
+        }
+      }
+      
+      let targetNoise = 0;
+      if (Math.abs(p.vx) > 10) {
+        if (isSneaking) targetNoise = 0.1;
+        else if (isRunning) targetNoise = 1.0;
+        else targetNoise = 0.4;
+      }
+      state.noiseLevel += (targetNoise - state.noiseLevel) * 5 * dt;
+      noiseFillEl.style.width = (state.noiseLevel * 100) + '%';
+      noiseFillEl.style.background = state.noiseLevel > 0.7 ? '#ff2e63' : state.noiseLevel > 0.3 ? '#ffcc00' : '#00f0ff';
+
+      if (isRunning && Math.abs(p.vx) > 100) state.camShake = 3;
+      else state.camShake *= 0.9;
+
+      if (p.isChibi) {
+        updateChibiPhysics(dt);
+      } else {
+        const nextX = p.x + p.vx * dt;
+        if (!checkWallCollision(nextX, p.y, p.w, p.h, false)) p.x = nextX; else p.vx = 0;
+        p.y = FLOOR_Y - p.h; 
+      }
+    }
+
+    let targetCamX = Math.max(0, Math.min(p.x + p.w/2 - canvas.width/2, currentRoomWidth - canvas.width));
+    if (currentRoomWidth < canvas.width) targetCamX = (currentRoomWidth / 2) - (canvas.width / 2);
+    state.cameraX += (targetCamX - state.cameraX) * 6 * dt;
+
+    let targetCamY = p.isChibi ? (p.y - canvas.height / 2) : (FLOOR_Y - canvas.height + 150);
+    if (targetCamY < 0) targetCamY = 0;
+    state.cameraY += (targetCamY - state.cameraY) * 6 * dt;
+  }
+
+  // ================= ГРАФИКА =================
+  function drawCharacter(char, isActive, walkCycle) {
+    ctx.save();
+    ctx.translate(char.x + char.w/2, char.y + char.h); 
+    if (char.dir === -1) ctx.scale(-1, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.beginPath(); ctx.ellipse(0, 0, char.w/2 + 5, 8, 0, 0, Math.PI*2); ctx.fill();
+
+    const alpha = isActive ? 1 : 0.4;
+    ctx.globalAlpha = alpha;
+
+    if (char.name === 'CHIBI') {
+      const isMoving = Math.abs(char.vx) > 5; const legSwing = isMoving ? Math.sin(walkCycle) * 8 : 0;
+      ctx.translate(0, -(isMoving ? Math.abs(Math.sin(walkCycle)) * 2 : 0));
+      
+      ctx.fillStyle = '#333'; ctx.fillRect(-6 + legSwing, -10, 4, 10); ctx.fillRect(2 - legSwing, -10, 4, 10);
+      ctx.fillStyle = char.color; ctx.fillRect(-8, -25, 16, 16);
+      ctx.fillStyle = '#ffccaa'; ctx.beginPath(); ctx.arc(0, -35, 12, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(4, -36, 5, 0, Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(-4, -36, 5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#00f0ff'; ctx.beginPath(); ctx.arc(6, -36, 2.5, 0, Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(-2, -36, 2.5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#ff2e63'; ctx.beginPath(); ctx.arc(0, -38, 12, Math.PI, 0); ctx.fill();
+    } else {
+      const isMoving = Math.abs(char.vx) > 5; const isRunning = Math.abs(char.vx) > 300;
+      const legSwing = isMoving ? Math.sin(walkCycle) * (isRunning ? 16 : 10) : 0;
+      ctx.translate(0, -(isMoving ? Math.abs(Math.sin(walkCycle)) * (isRunning ? 3 : 1.5) : 0));
+      
+      ctx.fillStyle = '#1a1a24'; ctx.fillRect(-10 + legSwing, -25, 10, 25); ctx.fillRect(2 - legSwing, -25, 10, 25);
+      ctx.fillStyle = '#000'; ctx.fillRect(-12 + legSwing, -5, 14, 5); ctx.fillRect(0 - legSwing, -5, 14, 5);
+      ctx.fillStyle = char.color; ctx.fillRect(-14, -60, 28, 38); ctx.fillStyle = '#222'; ctx.fillRect(-14, -45, 28, 3);
+      ctx.fillStyle = char.color; ctx.fillRect(10, -55, 20, 8); ctx.fillRect(-18, -55, 8, 20);
+      ctx.fillStyle = '#111'; ctx.fillRect(25, -56, 10, 10); ctx.fillStyle = '#ffffaa'; ctx.fillRect(35, -54, 4, 6);
+      ctx.fillStyle = '#ffccaa'; ctx.beginPath(); ctx.arc(2, -68, 12, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#221100'; ctx.beginPath(); ctx.arc(2, -72, 12, Math.PI, 0); ctx.fill(); ctx.fillRect(-10, -72, 4, 10);
+      if (char.name === 'ETHAN') { ctx.fillStyle = '#cc5522'; ctx.fillRect(-22, -60, 12, 28); }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.translate(-state.cameraX * 0.4, -state.cameraY * 0.4);
+    drawBackgroundLayer();
+    ctx.restore();
+
+    ctx.save();
+    if (state.camShake > 0.1) ctx.translate((Math.random() - 0.5) * state.camShake, (Math.random() - 0.5) * state.camShake);
+    ctx.translate(-Math.floor(state.cameraX), -Math.floor(state.cameraY));
+
+    drawEnvironment();
+    drawMidgroundDecor();
+
+    for (let plat of currentPlatforms) {
+      ctx.fillStyle = '#4a4a4a'; ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+      ctx.fillStyle = '#666'; ctx.fillRect(plat.x, plat.y, plat.w, 4);
+    }
+
+    for (let hole of currentSmallHoles) {
+      ctx.fillStyle = '#000'; ctx.fillRect(hole.x, hole.y, hole.w, hole.h);
+      ctx.strokeStyle = '#555'; ctx.lineWidth = 2; ctx.strokeRect(hole.x, hole.y, hole.w, hole.h);
+    }
+
+    for (let item of currentItems) {
+      if (item.collected) continue;
+      if (item.type === 'keycard') {
+        ctx.fillStyle = '#00f0ff'; ctx.shadowBlur = 15; ctx.shadowColor = '#00f0ff';
+        ctx.fillRect(item.x, item.y, item.w, item.h); ctx.fillStyle = '#fff'; ctx.fillRect(item.x + 5, item.y + 5, 10, 5);
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    for (const key in players) {
+      const p = players[key];
+      if (key === 'chibi' && !state.chibiSpawned) continue; 
+      if (state.currentRoomId === 'chibi_vent' && key !== 'chibi') continue;
+      if (state.inVent && key === state.activePlayer) continue;
+      drawCharacter(p, key === state.activePlayer, p.animTime);
+    }
+
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(-state.cameraX * 1.3, -state.cameraY * 1.3);
+    drawForegroundLayer();
+    ctx.restore();
+
+    if (state.currentRoomId !== 'chibi_vent') {
+      const p = players[state.activePlayer];
+      const px = p.x + p.w/2 - state.cameraX; const py = p.y + p.h/2 - state.cameraY;
+      darkCtx.clearRect(0, 0, darkCanvas.width, darkCanvas.height);
+      darkCtx.fillStyle = 'rgba(0, 0, 0, 0.96)'; darkCtx.fillRect(0, 0, darkCanvas.width, darkCanvas.height);
+      darkCtx.globalCompositeOperation = 'destination-out';
+      const haloR = p.isChibi ? 150 : 220;
+      const haloGrad = darkCtx.createRadialGradient(px, py, 10, px, py, haloR);
+      haloGrad.addColorStop(0, 'rgba(0,0,0,1)'); haloGrad.addColorStop(0.5, 'rgba(0,0,0,1)'); haloGrad.addColorStop(1, 'rgba(0,0,0,0)');     
+      darkCtx.fillStyle = haloGrad; darkCtx.beginPath(); darkCtx.arc(px, py, haloR, 0, Math.PI*2); darkCtx.fill();
+
+      if (!state.inVent && !p.isChibi) { 
+        const dir = p.dir || 1; const len = 900; const spread = 350; 
+        const startX = px + dir * 20; const startY = py - 20; const endX = px + dir * len;
+        const coneGrad = darkCtx.createLinearGradient(startX, startY, endX, startY);
+        coneGrad.addColorStop(0, 'rgba(0,0,0,1)'); coneGrad.addColorStop(0.7, 'rgba(0,0,0,1)'); coneGrad.addColorStop(1, 'rgba(0,0,0,0)');   
+        darkCtx.fillStyle = coneGrad;
+        darkCtx.beginPath(); darkCtx.moveTo(startX, startY - 15); darkCtx.lineTo(endX, startY - spread); darkCtx.lineTo(endX, startY + spread); darkCtx.lineTo(startX, startY + 15); darkCtx.fill();
+      }
+      ctx.drawImage(darkCanvas, 0, 0);
+    }
+
+    drawMinimap();
+    drawOffscreenIndicators();
+
+    if (state.currentRoomId === 'chibi_vent') {
+      ctx.fillStyle = 'rgba(0, 255, 0, 0.15)'; ctx.fillRect(0, 0, canvas.width, 60);
+      ctx.fillStyle = '#00ff00'; ctx.font = 'bold 20px Courier New'; ctx.textAlign = 'center';
+      ctx.fillText('SPACE — ПРЫЖОК  |  ESC — ВЫЙТИ', canvas.width/2, 40); ctx.textAlign = 'left';
+    }
+
+    if (state.hacking.active) drawHackingUI();
+  }
+
+  function drawOffscreenIndicators() {
+    const p = players[state.activePlayer];
+    
+    currentDoors.forEach(door => {
+      if (door.isDepth) return;
+      
+      const doorCenter = door.x + door.w / 2;
+      const screenX = doorCenter - state.cameraX;
+      
+      if (screenX < 0) {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.6)';
+        ctx.beginPath(); ctx.moveTo(30, canvas.height / 2); ctx.lineTo(0, canvas.height / 2 - 20); ctx.lineTo(0, canvas.height / 2 + 20); ctx.fill();
+      } else if (screenX > canvas.width) {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.6)';
+        ctx.beginPath(); ctx.moveTo(canvas.width - 30, canvas.height / 2); ctx.lineTo(canvas.width, canvas.height / 2 - 20); ctx.lineTo(canvas.width, canvas.height / 2 + 20); ctx.fill();
+      }
+    });
+  }
+
+  // ОБНОВЛЕННАЯ МИНИ-КАРТА ПОД СЕТКУ 4x4
+  function drawMinimap() {
+    const mapSize = 150;
+    const padding = 20;
+    const startX = canvas.width - mapSize - padding;
+    const startY = canvas.height - mapSize - padding; 
+    
+    // Вычисляем размер ячеек для 4x4
+    const cellW = 25; 
+    const cellH = 20;
+    const gap = 5;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(startX - 10, startY - 10, mapSize, mapSize);
+    ctx.strokeStyle = '#00f0ff'; ctx.lineWidth = 2; ctx.strokeRect(startX - 10, startY - 10, mapSize, mapSize);
+
+    for (const key in roomsData) {
+      const room = roomsData[key];
+      if (room.mapX === -1) continue; 
+
+      const rx = startX + room.mapX * (cellW + gap);
+      const ry = startY + room.mapY * (cellH + gap);
+      
+      const isCurrent = state.currentRoomId === key;
+      ctx.fillStyle = isCurrent ? '#00f0ff' : '#334';
+      ctx.fillRect(rx, ry, cellW, cellH);
+      
+      if (isCurrent) {
+        ctx.fillStyle = '#000'; ctx.font = 'bold 9px Courier New'; ctx.textAlign = 'center';
+        ctx.fillText('YOU', rx + cellW/2, ry + cellH/2 + 3); ctx.textAlign = 'left';
+      }
+    }
+  }
+
+  function drawBackgroundLayer() {
+    if (state.currentRoomId === 'chibi_vent') {
+      ctx.fillStyle = '#001a00'; ctx.fillRect(0, 0, WORLD_END_X, 800);
+      ctx.strokeStyle = 'rgba(0, 255, 0, 0.1)'; ctx.lineWidth = 1;
+      for(let i=0; i<WORLD_END_X; i+=50) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 800); ctx.stroke(); }
+    } else {
+      for (let i = -1000; i < WORLD_END_X + 2000; i += 600) {
+        ctx.fillStyle = '#0a0c10'; ctx.fillRect(i, 100, 300, 500);
+        ctx.strokeStyle = '#11141a'; ctx.lineWidth = 4; ctx.strokeRect(i, 100, 300, 500);
+        for (let j = 120; j < 600; j += 40) { ctx.fillStyle = '#07080a'; ctx.fillRect(i + 10, j, 280, 20); }
+      }
+    }
+  }
+
+  function drawForegroundLayer() {
+    for (let d of currentDecor) {
+      if (d.layer !== 'fg') continue;
+      if (d.type === 'fg_pipe') {
+        ctx.fillStyle = '#000000'; ctx.fillRect(d.x, d.y, d.w, d.h);
+        ctx.fillStyle = '#1a1a1a'; ctx.fillRect(d.x + 5, d.y, 5, d.h);
+      }
+    }
+  }
+
+  function drawMidgroundDecor() {
+    for (let d of currentDecor) {
+      if (d.layer !== 'mid') continue;
+      if (d.type === 'crate' || d.type === 'desk' || d.type === 'terminal') {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.ellipse(d.x + d.w/2, d.y + d.h, d.w/2, 6, 0, 0, Math.PI*2); ctx.fill();
+      }
+      if (d.type === 'terminal') {
+        ctx.fillStyle = '#111'; ctx.fillRect(d.x, d.y, d.w, d.h);
+        ctx.fillStyle = '#00f0ff'; ctx.shadowBlur = 10; ctx.shadowColor = '#00f0ff';
+        ctx.fillRect(d.x + 5, d.y + 5, d.w - 10, d.h - 20); ctx.shadowBlur = 0;
+      } else if (d.type === 'crate') {
+        ctx.fillStyle = '#2a2015'; ctx.fillRect(d.x, d.y, d.w, d.h);
+        ctx.strokeStyle = '#3a2a18'; ctx.lineWidth = 3; ctx.strokeRect(d.x, d.y, d.w, d.h);
+        ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x + d.w, d.y + d.h); ctx.stroke();
+      } else if (d.type === 'desk') {
+        ctx.fillStyle = '#3a2515'; ctx.fillRect(d.x, d.y, d.w, d.h);
+        ctx.fillStyle = '#111'; ctx.fillRect(d.x + 10, d.y + d.h, 10, 20);
+      } else if (d.type === 'pillar') {
+        ctx.fillStyle = '#000'; ctx.fillRect(d.x + 15, 0, d.w, d.h);
+        ctx.fillStyle = '#222'; ctx.fillRect(d.x, 0, d.w, d.h);
+        ctx.fillStyle = '#555'; ctx.fillRect(d.x, 0, 5, d.h);
+      }
+    }
+  }
+
+  function drawEnvironment() {
+    ctx.fillStyle = '#000000'; ctx.fillRect(-5000, -5000, 10000, 10000);
+    const wallGrad = ctx.createLinearGradient(0, 0, 0, FLOOR_Y);
+    wallGrad.addColorStop(0, '#14171c'); wallGrad.addColorStop(1, '#2a2e38');
+    ctx.fillStyle = wallGrad; ctx.fillRect(0, 0, currentRoomWidth, FLOOR_Y);
+
+    for (let i = 0; i < currentRoomWidth; i += 100) { ctx.strokeStyle = '#0d0f14'; ctx.lineWidth = 2; ctx.strokeRect(i, 0, 100, FLOOR_Y); }
+
+    const floorGrad = ctx.createLinearGradient(0, FLOOR_Y, 0, FLOOR_Y + 200);
+    floorGrad.addColorStop(0, '#15181a'); floorGrad.addColorStop(1, '#050608');
+    ctx.fillStyle = floorGrad; ctx.fillRect(0, FLOOR_Y, currentRoomWidth, 300);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)'; ctx.lineWidth = 1;
+    for (let i = 0; i < currentRoomWidth; i += 80) { ctx.beginPath(); ctx.moveTo(i, FLOOR_Y); ctx.lineTo(i - 150, FLOOR_Y + 300); ctx.stroke(); }
+    for (let j = FLOOR_Y; j < FLOOR_Y + 300; j += 40) { const spread = (j - FLOOR_Y) * 0.5; ctx.beginPath(); ctx.moveTo(-spread, j); ctx.lineTo(currentRoomWidth + spread, j); ctx.stroke(); }
+
+    ctx.fillStyle = '#111'; ctx.fillRect(0, FLOOR_Y - 20, currentRoomWidth, 20);
+    ctx.fillStyle = '#333'; ctx.fillRect(0, FLOOR_Y - 22, currentRoomWidth, 2);
+
+    for (let wall of currentWalls) {
+      ctx.fillStyle = '#000'; ctx.fillRect(wall.x + 15, 0, wall.w, FLOOR_Y);
+      ctx.fillStyle = '#222'; ctx.fillRect(wall.x, 0, wall.w, wall.h);
+      ctx.fillStyle = '#555'; ctx.fillRect(wall.x, 0, 5, wall.h);
+    }
+
+    for (let d of currentDoors) {
+      const isUnlocked = !d.requiresHack || d.isHacked;
+      const pulse = 0.5 + Math.sin(state.time * 5) * 0.3;
+
+      if (d.isDepth) {
+        ctx.fillStyle = '#0a0a0a';
+        ctx.fillRect(d.x, d.y - 10, d.w, d.h + 10);
+        
+        ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
+        for (let i = 10; i < d.w; i += 15) {
+          ctx.beginPath(); ctx.moveTo(d.x + i, d.y - 10); ctx.lineTo(d.x + i, d.y + d.h); ctx.stroke();
+        }
+        
+        ctx.strokeStyle = isUnlocked ? `rgba(0, 255, 0, ${pulse})` : `rgba(255, 0, 0, ${pulse})`;
+        ctx.lineWidth = 4; ctx.strokeRect(d.x, d.y - 10, d.w, d.h + 10);
+
+        ctx.fillStyle = isUnlocked ? '#0f0' : '#f00';
+        ctx.font = 'bold 16px Courier New'; ctx.textAlign = 'center';
+        
+        if (d.label.includes('ВНИЗ')) {
+          ctx.fillText('▼ ' + d.label + ' ▼', d.x + d.w/2, d.y + 25);
+        } else {
+          ctx.fillText('▲ ' + d.label + ' ▲', d.x + d.w/2, d.y + 25);
+        }
+        ctx.textAlign = 'left';
+
+      } else {
+        ctx.fillStyle = '#000000'; ctx.fillRect(d.x - 10, d.y - 10, d.w + 20, d.h + 10);
+        ctx.strokeStyle = isUnlocked ? '#0f0' : '#f00';
+        ctx.lineWidth = 4; ctx.strokeRect(d.x - 5, d.y - 5, d.w + 10, d.h + 5);
+        
+        ctx.fillStyle = isUnlocked ? `rgba(0, 255, 0, ${0.15 * pulse})` : `rgba(255, 0, 0, ${0.15 * pulse})`;
+        ctx.fillRect(d.x, d.y, d.w, d.h);
+
+        if (!d.isOpen) {
+          ctx.fillStyle = isUnlocked ? '#2a3a2a' : '#2a303a';
+          ctx.fillRect(d.x, d.y, d.w/2 - 2, d.h); ctx.fillRect(d.x + d.w/2 + 2, d.y, d.w/2 - 2, d.h);
+        } else {
+          ctx.fillStyle = '#1a202a'; ctx.fillRect(d.x - 20, d.y, 20, d.h); ctx.fillRect(d.x + d.w, d.y, 20, d.h); 
+        }
+
+        if (d.label) {
+          ctx.fillStyle = isUnlocked ? '#0f0' : '#f00';
+          ctx.font = 'bold 12px Courier New'; ctx.textAlign = 'center';
+          ctx.fillText(d.label, d.x + d.w/2, d.y - 15); ctx.textAlign = 'left';
+        }
+      }
+    }
+  }
+
+  function drawHackingUI() {
+    const p = players[state.activePlayer];
+    const px = p.x + p.w/2 - state.cameraX; const py = p.y - 100 - state.cameraY;
+    const radius = 70; const hack = state.hacking; const targetRadius = radius - 10;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.8)'; ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = '#00f0ff';
+    ctx.beginPath(); ctx.arc(px, py, radius, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, targetRadius - 15, 0, Math.PI*2); ctx.stroke();
+
+    let targetColor = '#ffffff';
+    if (hack.flashTimer > 0) targetColor = hack.flashColor;
+    ctx.strokeStyle = targetColor; ctx.shadowColor = targetColor; ctx.lineWidth = 12; 
+    ctx.beginPath(); ctx.arc(px, py, targetRadius, hack.targetAngle - hack.targetWidth/2, hack.targetAngle + hack.targetWidth/2); ctx.stroke();
+
+    const arrowX = px + Math.cos(hack.angle) * targetRadius; const arrowY = py + Math.sin(hack.angle) * targetRadius;
+    ctx.fillStyle = '#00f0ff'; ctx.shadowColor = '#00f0ff'; ctx.shadowBlur = 15;
+    ctx.beginPath(); ctx.arc(arrowX, arrowY, 8, 0, Math.PI*2); ctx.fill();
+
+    ctx.shadowBlur = 0;
+    for (let i = 0; i < hack.maxProgress; i++) {
+      const dotX = px - 30 + i * 30; const dotY = py + radius + 30;
+      ctx.fillStyle = i < hack.progress ? '#00ff00' : '#333';
+      ctx.beginPath(); ctx.arc(dotX, dotY, 6, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px Courier New'; ctx.textAlign = 'center';
+    ctx.fillText('ПРОБЕЛ — ВЗЛОМ  |  E — ОТМЕНА', px, py + radius + 60); ctx.textAlign = 'left';
+  }
+
+  function winGame() {
+    state.running = false; overlay.classList.remove('hidden');
+    overlay.querySelector('h1').textContent = 'ПОБЕГ УДАЛСЯ';
+    overlay.querySelector('h1').style.color = '#00ff00';
+    overlay.querySelector('p').innerHTML = 'Ты выбрался из сектора 7.<br><br>Попробуй сгенерировать новый лабиринт!';
+    startBtn.textContent = 'НОВЫЙ ЛАБИРИНТ';
+  }
+
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = Math.min((now - lastTime) / 1000, 0.05); lastTime = now;
+    update(dt); draw(); requestAnimationFrame(loop);
+  }
+
+  function startGame() {
+    initAudio(); state.running = true; state.activePlayer = 'ethan';
+    state.chibiSpawned = false; state.hasKeycard = false; state.playerOrder = ['ethan', 'mia'];
+    Object.values(players).forEach(p => { p.vx = 0; p.vy = 0; p.dir = 1; p.animTime = 0; });
+    state.noiseLevel = 0; state.camShake = 0; state.particles = []; state.hacking.active = false;
+
+    // ГЕНЕРИРУЕМ НОВЫЙ УРОВЕНЬ 4x4
+    generateLevel();
+    
+    // Ищем стартовую комнату и загружаем её
+    let startId = 'room_0_0';
+    for (const id in roomsData) { if (roomsData[id].type === 'start') startId = id; }
+    loadRoom(startId, 100); 
+
+    updateHUD();
+    startBtn.blur(); overlay.classList.add('hidden');
+    lastTime = performance.now();
+  }
+
+  startBtn.addEventListener('click', startGame);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
