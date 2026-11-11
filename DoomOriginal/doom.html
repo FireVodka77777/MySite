@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOOM-Lite: Final Fix</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; cursor: crosshair; }
+  
+  .hud {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 80px;
+    background: #222; border-top: 3px solid #555;
+    display: flex; justify-content: center; align-items: flex-end; gap: 20px;
+    padding-bottom: 10px; color: #fff; font-family: 'Courier New', monospace;
+    pointer-events: none; text-shadow: 2px 2px 0 #000;
+  }
+  .hud-block { display: flex; flex-direction: column; align-items: center; }
+  .hud-label { font-size: 10px; color: #aaa; letter-spacing: 1px; }
+  .hud-value { font-size: 32px; font-weight: bold; color: #ff2e63; line-height: 1; }
+  .hud-value.red { color: #ff0000; }
+  
+  .face {
+    width: 60px; height: 60px; background: #333; border: 2px solid #555;
+    display: grid; place-items: center; font-size: 24px; color: #fff;
+  }
+  
+  .crosshair {
+    position: absolute; top: 50%; left: 50%; width: 20px; height: 20px;
+    transform: translate(-50%, -50%); pointer-events: none; display: none; z-index: 10;
+  }
+  .crosshair::before, .crosshair::after {
+    content: ''; position: absolute; background: rgba(255,255,255,0.8);
+  }
+  .crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
+  .crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
+  
+  .overlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.9);
+    display: grid; place-items: center; text-align: center; z-index: 100;
+    color: #fff; transition: opacity 0.3s;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .overlay h1 { font-size: 4rem; color: #ff2e63; letter-spacing: 10px; margin-bottom: 20px; text-shadow: 0 0 20px #ff2e63; }
+  .overlay p { font-size: 1.2rem; line-height: 2; margin-bottom: 30px; }
+  .overlay button {
+    background: #ff2e63; color: #000; border: none; padding: 15px 40px;
+    font-size: 1.5rem; font-weight: bold; cursor: pointer; font-family: inherit;
+  }
+  .overlay button:hover { background: #fff; }
+</style>
+</head>
+<body>
+
+<div class="crosshair" id="crosshair"></div>
+
+<div class="hud">
+  <div class="hud-block">
+    <span class="hud-label">ПАТРОНЫ</span>
+    <span class="hud-value" id="ammo">50</span>
+  </div>
+  <div class="hud-block">
+    <span class="hud-label">ЗДОРОВЬЕ</span>
+    <span class="hud-value red" id="hp">100%</span>
+  </div>
+  <div class="hud-block">
+    <div class="face" id="face">🙂</div>
+  </div>
+  <div class="hud-block">
+    <span class="hud-label">ВРАГИ</span>
+    <span class="hud-value" id="enemies">0</span>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div>
+    <h1>DOOM LITE</h1>
+    <p>
+      <b>W A S D</b> — Движение<br>
+      <b>Мышь</b> — Поворот<br>
+      <b>Клик / Пробел</b> — Стрельба<br>
+      <b>1</b> — Пистолет, <b>2</b> — Дробовик
+    </p>
+    <button id="startBtn">НАЧАТЬ БОЙ</button>
+  </div>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const crosshair = document.getElementById('crosshair');
+  
+  const hpEl = document.getElementById('hp');
+  const ammoEl = document.getElementById('ammo');
+  const enemiesEl = document.getElementById('enemies');
+  const faceEl = document.getElementById('face');
+
+  const W = 320; 
+  const H = 200;
+  
+  function resize() {
+    canvas.width = W;
+    canvas.height = H;
+    ctx.imageSmoothingEnabled = false;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1],
+    [1,0,0,0,0,0,1,1,1,1,0,0,0,0,0,1],
+    [1,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1],
+    [1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],
+    [1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],
+    [1,0,0,0,0,0,1,1,1,1,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+  ];
+  const MAP_W = MAP[0].length;
+  const MAP_H = MAP.length;
+
+  const state = { running: false, gameOver: false, shootCd: 0, score: 0, ammo: 50, currentWeapon: 1, bob: 0, time: 0 };
+  const player = { x: 2.5, y: 2.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66, hp: 100, hitFlash: 0 };
+  let enemies = [];
+  let bloodDecals = [];
+  let particles = [];
+  let items = []; 
+  const keys = {};
+
+  let audioCtx = null;
+  function initAudio() { try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
+  function playSound(type) {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    if (type === 'shoot_pistol') {
+      osc.type = 'square'; osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    } else if (type === 'shoot_shotgun') {
+      osc.type = 'sawtooth'; osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.3);
+      gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.3);
+    } else if (type === 'hit') {
+      osc.type = 'square'; osc.frequency.setValueAtTime(200, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+    } else if (type === 'death') {
+      osc.type = 'sawtooth'; osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.6);
+      gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.6);
+    }
+  }
+
+  // --- ТЕКСТУРЫ ---
+  const texSize = 64;
+  const texCanvas = document.createElement('canvas');
+  texCanvas.width = texCanvas.height = texSize;
+  const texCtx = texCanvas.getContext('2d');
+  for (let y = 0; y < texSize; y++) {
+    for (let x = 0; x < texSize; x++) {
+      const row = Math.floor(y / 16);
+      const offset = row % 2 === 0 ? 0 : 16;
+      const mortar = (y % 16 < 2) || ((x + offset) % 32 < 2);
+      if (mortar) texCtx.fillStyle = '#2a0a0a';
+      else {
+        const sh = 0.6 + Math.random() * 0.4;
+        texCtx.fillStyle = `rgb(${180*sh|0},${80*sh|0},${60*sh|0})`;
+      }
+      texCtx.fillRect(x, y, 1, 1);
+    }
+  }
+  const texData = texCtx.getImageData(0, 0, texSize, texSize).data;
+
+  const floorTexSize = 32;
+  const floorCanvas = document.createElement('canvas');
+  floorCanvas.width = floorCanvas.height = floorTexSize;
+  const floorCtx = floorCanvas.getContext('2d');
+  for (let y = 0; y < floorTexSize; y++) {
+    for (let x = 0; x < floorTexSize; x++) {
+      const sh = 0.3 + Math.random() * 0.3;
+      floorCtx.fillStyle = `rgb(${50*sh|0},${50*sh|0},${50*sh|0})`;
+      floorCtx.fillRect(x, y, 1, 1);
+    }
+  }
+  const floorTexData = floorCtx.getImageData(0, 0, floorTexSize, floorTexSize).data;
+
+  // --- СПРАЙТ ВРАГА ---
+  const sprSize = 64;
+  const sprCanvas = document.createElement('canvas');
+  sprCanvas.width = sprCanvas.height = sprSize;
+  const sprCtx = sprCanvas.getContext('2d');
+  sprCtx.clearRect(0, 0, sprSize, sprSize);
+
+  // Тело
+  sprCtx.fillStyle = '#3a0000';
+  sprCtx.beginPath(); sprCtx.ellipse(32, 45, 18, 18, 0, 0, Math.PI*2); sprCtx.fill();
+  
+  // Голова
+  sprCtx.fillStyle = '#4a0000';
+  sprCtx.beginPath(); sprCtx.ellipse(32, 20, 14, 12, 0, 0, Math.PI*2); sprCtx.fill();
+  
+  // Рога
+  sprCtx.fillStyle = '#ddd';
+  sprCtx.beginPath(); sprCtx.moveTo(20, 12); sprCtx.lineTo(12, 2); sprCtx.lineTo(24, 10); sprCtx.fill();
+  sprCtx.beginPath(); sprCtx.moveTo(44, 12); sprCtx.lineTo(52, 2); sprCtx.lineTo(40, 10); sprCtx.fill();
+  
+  // Глаза
+  sprCtx.fillStyle = '#ff0';
+  sprCtx.beginPath(); sprCtx.arc(26, 18, 4, 0, Math.PI*2); sprCtx.fill();
+  sprCtx.beginPath(); sprCtx.arc(38, 18, 4, 0, Math.PI*2); sprCtx.fill();
+  sprCtx.fillStyle = '#000';
+  sprCtx.beginPath(); sprCtx.arc(27, 18, 2, 0, Math.PI*2); sprCtx.fill();
+  sprCtx.beginPath(); sprCtx.arc(39, 18, 2, 0, Math.PI*2); sprCtx.fill();
+  
+  // Рот
+  sprCtx.fillStyle = '#000';
+  sprCtx.beginPath(); sprCtx.ellipse(32, 28, 8, 4, 0, 0, Math.PI*2); sprCtx.fill();
+  sprCtx.fillStyle = '#fff';
+  sprCtx.beginPath(); sprCtx.moveTo(28, 28); sprCtx.lineTo(30, 32); sprCtx.lineTo(32, 28); sprCtx.fill();
+  sprCtx.beginPath(); sprCtx.moveTo(32, 28); sprCtx.lineTo(34, 32); sprCtx.lineTo(36, 28); sprCtx.fill();
+
+  const sprData = sprCtx.getImageData(0, 0, sprSize, sprSize).data;
+
+  // --- СПРАЙТ АПТЕЧКИ ---
+  const itemSize = 64;
+  const itemCanvas = document.createElement('canvas');
+  itemCanvas.width = itemCanvas.height = itemSize;
+  const itemCtx = itemCanvas.getContext('2d');
+  itemCtx.clearRect(0, 0, itemSize, itemSize);
+  itemCtx.fillStyle = '#eee'; itemCtx.fillRect(16, 16, 32, 32);
+  itemCtx.strokeStyle = '#555'; itemCtx.lineWidth = 2; itemCtx.strokeRect(16, 16, 32, 32);
+  itemCtx.fillStyle = '#f00';
+  itemCtx.fillRect(28, 20, 8, 24);
+  itemCtx.fillRect(20, 28, 24, 8);
+  const itemData = itemCtx.getImageData(0, 0, itemSize, itemSize).data;
+
+  // --- БУФЕРЫ ---
+  const imgData = ctx.createImageData(W, H);
+  const bgData = ctx.createImageData(W, H);
+  const zbuffer = new Float32Array(W);
+
+  for (let y = 0; y < H/2; y++) {
+    const t = y / (H/2);
+    const r = 20 + t*20|0, g = 20 + t*20|0, b = 40 + t*40|0;
+    for (let x = 0; x < W; x++) {
+      const i = (y*W + x) * 4;
+      bgData.data[i] = r; bgData.data[i+1] = g; bgData.data[i+2] = b; bgData.data[i+3] = 255;
+    }
+  }
+
+  // --- ЛОГИКА ---
+  const isWall = (x, y) => {
+    const mx = x | 0, my = y | 0;
+    if (mx < 0 || my < 0 || mx >= MAP_W || my >= MAP_H) return true;
+    return MAP[my][mx] > 0;
+  };
+
+  function tryMove(dx, dy) {
+    if (!isWall(player.x + dx, player.y)) player.x += dx;
+    if (!isWall(player.x, player.y + dy)) player.y += dy;
+  }
+
+  function rotate(a) {
+    const c = Math.cos(a), s = Math.sin(a);
+    const odx = player.dirX;
+    player.dirX = player.dirX*c - player.dirY*s;
+    player.dirY = odx*s + player.dirY*c;
+    const opx = player.planeX;
+    player.planeX = player.planeX*c - player.planeY*s;
+    player.planeY = opx*s + player.planeY*c;
+  }
+
+  let hitEnemy = null;
+
+  function shoot() {
+    if (!state.running || state.gameOver) return;
+    if (state.shootCd > 0) return;
+    
+    let dmg = 50, cd = 250, sound = 'shoot_pistol';
+    if (state.currentWeapon === 2) { dmg = 120; cd = 800; sound = 'shoot_shotgun'; }
+
+    state.shootCd = cd;
+    playSound(sound);
+    player.hitFlash = 0.1;
+    hitEnemy = null;
+
+    const rays = state.currentWeapon === 2 ? 3 : 1;
+    
+    for(let r=0; r<rays; r++) {
+        let target = null, best = Infinity;
+        for (const e of enemies) {
+          const dx = e.x - player.x, dy = e.y - player.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 15) continue;
+          const dot = dx*player.dirX + dy*player.dirY;
+          if (dot <= 0) continue;
+          const accuracy = state.currentWeapon === 2 ? 0.85 : 0.93;
+          if (dot / dist < accuracy) continue;
+          if (dist < best) { best = dist; target = e; }
+        }
+
+        if (target) {
+          target.hp -= dmg;
+          playSound('hit');
+          hitEnemy = target;
+          
+          for(let i=0; i<5; i++) {
+             particles.push({
+                 x: target.x, y: target.y, z: 0.5,
+                 vx: (Math.random()-0.5)*2, vy: (Math.random()-0.5)*2, vz: 1 + Math.random(),
+                 life: 1
+             });
+          }
+
+          if (target.hp <= 0) {
+            playSound('death');
+            enemies = enemies.filter(e => e !== target);
+            state.score += 100;
+            enemiesEl.textContent = enemies.length;
+            bloodDecals.push({ x: target.x, y: target.y, size: 0.5 });
+          }
+        }
+    }
+  }
+
+  // --- РЕНДЕР ---
+  function render() {
+    imgData.data.set(bgData.data);
+
+    // 1. Пол
+    for (let y = H/2; y < H; y++) {
+        const p = y - H/2;
+        const posZ = 0.5 * H;
+        const rowDist = posZ / (p || 1);
+
+        const floorStepX = rowDist * (player.dirX + player.planeX) - rowDist * (player.dirX - player.planeX);
+        const floorStepY = rowDist * (player.dirY + player.planeY) - rowDist * (player.dirY - player.planeY);
+        let floorX = player.x + rowDist * (player.dirX - player.planeX);
+        let floorY = player.y + rowDist * (player.dirY - player.planeY);
+
+        const shade = Math.max(0.1, 1 - rowDist/15);
+
+        for (let x = 0; x < W; x++) {
+            const cellX = floorX | 0;
+            const cellY = floorY | 0;
+            
+            let isBlood = false;
+            for(let b of bloodDecals) {
+                if (Math.abs(b.x - floorX) < b.size && Math.abs(b.y - floorY) < b.size) {
+                    isBlood = true; break;
+                }
+            }
+
+            const i = (y * W + x) * 4;
+            if (isBlood) {
+                imgData.data[i] = 100 * shade; imgData.data[i+1] = 0; imgData.data[i+2] = 0;
+            } else {
+                const tx = ((floorX - cellX) * floorTexSize) & (floorTexSize - 1);
+                const ty = ((floorY - cellY) * floorTexSize) & (floorTexSize - 1);
+                const tI = (ty * floorTexSize + tx) * 4;
+                imgData.data[i]   = floorTexData[tI] * shade;
+                imgData.data[i+1] = floorTexData[tI+1] * shade;
+                imgData.data[i+2] = floorTexData[tI+2] * shade;
+            }
+            imgData.data[i+3] = 255;
+
+            floorX += floorStepX;
+            floorY += floorStepY;
+        }
+    }
+
+    // 2. Стены
+    for (let x = 0; x < W; x++) {
+      const cameraX = 2*x/W - 1;
+      const rayDirX = player.dirX + player.planeX*cameraX;
+      const rayDirY = player.dirY + player.planeY*cameraX;
+      let mapX = player.x|0, mapY = player.y|0;
+      const ddx = rayDirX === 0 ? 1e30 : Math.abs(1/rayDirX);
+      const ddy = rayDirY === 0 ? 1e30 : Math.abs(1/rayDirY);
+      let stepX, stepY, sdx, sdy;
+      if (rayDirX < 0) { stepX = -1; sdx = (player.x - mapX) * ddx; }
+      else { stepX = 1; sdx = (mapX + 1 - player.x) * ddx; }
+      if (rayDirY < 0) { stepY = -1; sdy = (player.y - mapY) * ddy; }
+      else { stepY = 1; sdy = (mapY + 1 - player.y) * ddy; }
+
+      let side = 0, safety = 0;
+      while (safety++ < 100) {
+        if (sdx < sdy) { sdx += ddx; mapX += stepX; side = 0; }
+        else { sdy += ddy; mapY += stepY; side = 1; }
+        if (mapX < 0 || mapY < 0 || mapX >= MAP_W || mapY >= MAP_H) break;
+        if (MAP[mapY][mapX] > 0) break;
+      }
+
+      const perp = Math.max(0.01, side === 0 ? (sdx - ddx) : (sdy - ddy));
+      zbuffer[x] = perp;
+      const lineH = H / perp | 0;
+      let y0 = (-lineH/2 + H/2) | 0;
+      let y1 = (lineH/2 + H/2) | 0;
+      if (y0 < 0) y0 = 0;
+      if (y1 > H-1) y1 = H-1;
+
+      let wallX = side === 0 ? player.y + perp * rayDirY : player.x + perp * rayDirX;
+      wallX -= Math.floor(wallX);
+      let texX = wallX * texSize | 0;
+      if (side === 0 && rayDirX > 0) texX = texSize - texX - 1;
+      if (side === 1 && rayDirY < 0) texX = texSize - texX - 1;
+
+      const step = texSize / lineH;
+      let texPos = (y0 - H/2 + lineH/2) * step;
+      
+      const shade = Math.max(0.1, 1 - perp/12);
+      const sideSh = side === 1 ? 0.65 : 1;
+      const finalSh = shade * sideSh;
+
+      for (let y = y0; y <= y1; y++) {
+        const texY = Math.floor(texPos) & (texSize - 1);
+        texPos += step;
+        const tI = (texY * texSize + texX) * 4;
+        const i = (y * W + x) * 4;
+        imgData.data[i]   = texData[tI]   * finalSh;
+        imgData.data[i+1] = texData[tI+1] * finalSh;
+        imgData.data[i+2] = texData[tI+2] * finalSh;
+        imgData.data[i+3] = 255;
+      }
+    }
+
+    // 3. Спрайты (Враги и Аптечки)
+    const visible = [];
+    for (const e of enemies) {
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      visible.push({ type: 'enemy', obj: e, dx, dy, dist: dx*dx + dy*dy });
+    }
+    for (const it of items) {
+      const dx = it.x - player.x;
+      const dy = it.y - player.y;
+      visible.push({ type: 'item', obj: it, dx, dy, dist: dx*dx + dy*dy });
+    }
+    
+    // Сортируем от дальних к ближним
+    visible.sort((a, b) => b.dist - a.dist);
+    
+    // Матрица для проекции (инвертируем камеру)
+    const invDet = 1 / (player.planeX * player.dirY - player.dirX * player.planeY);
+
+    for (const v of visible) {
+      const sx = v.dx;
+      const sy = v.dy;
+      
+      // Перевод в координаты камеры
+      const transformX = invDet * (player.dirY * sx - player.dirX * sy);
+      const transformY = invDet * (-player.planeY * sx + player.planeX * sy);
+      
+      // Если объект за спиной или слишком близко - пропускаем
+      if (transformY <= 0.1) continue;
+
+      // Координаты на экране
+      const scrX = Math.floor((W / 2) * (1 + transformX / transformY));
+      
+      // Если объект за пределами экрана по X - пропускаем
+      if (scrX < -W || scrX > W * 2) continue;
+
+      // Высота спрайта на экране
+      const spriteHeight = Math.abs(Math.floor(H / transformY));
+      const spriteWidth = spriteHeight;
+      
+      // Верхняя и нижняя границы спрайта
+      const y0 = Math.floor(-spriteHeight / 2 + H / 2);
+      const y1 = Math.floor(spriteHeight / 2 + H / 2);
+      
+      // Левая и правая границы
+      const x0 = Math.floor(-spriteWidth / 2 + scrX);
+      const x1 = Math.floor(spriteWidth / 2 + scrX);
+
+      // Выбираем текстуру
+      const sprTexData = (v.type === 'enemy') ? sprData : itemData;
+      const sprTexSize = (v.type === 'enemy') ? sprSize : itemSize;
+      
+      // Затухание (чем дальше, тем темнее)
+      const shade = Math.max(0.2, 1 - transformY / 15);
+
+      const isHit = (v.type === 'enemy' && v.obj === hitEnemy && player.hitFlash > 0);
+
+      // Проходим по каждому столбцу (пикселю по X)
+      for (let stripe = x0; stripe < x1; stripe++) {
+        // Проверка границ экрана и Z-буфера (стены перекрывают спрайт)
+        if (stripe < 0 || stripe >= W) continue;
+        if (transformY >= zbuffer[stripe]) continue; 
+
+        // Координата текстуры по X
+        const texX = Math.floor(((stripe - x0) * sprTexSize) / spriteWidth);
+        if (texX < 0 || texX >= sprTexSize) continue;
+
+        // Проходим по каждому пикселю по Y
+        for (let y = y0; y < y1; y++) {
+          if (y < 0 || y >= H) continue;
+
+          // Координата текстуры по Y
+          const texY = Math.floor(((y - y0) * sprTexSize) / spriteHeight);
+          if (texY < 0 || texY >= sprTexSize) continue;
+
+          const tI = (texY * sprTexSize + texX) * 4;
+          
+          // Прозрачность (если пиксель прозрачный - пропускаем)
+          if (sprTexData[tI + 3] < 128) continue; 
+
+          const i = (y * W + stripe) * 4;
+
+          // Отрисовка с учетом освещения и вспышки
+          if (isHit) {
+            imgData.data[i] = 255;
+            imgData.data[i+1] = 255;
+            imgData.data[i+2] = 255;
+          } else {
+            imgData.data[i]   = sprTexData[tI]   * shade;
+            imgData.data[i+1] = sprTexData[tI+1] * shade;
+            imgData.data[i+2] = sprTexData[tI+2] * shade;
+          }
+          imgData.data[i+3] = 255; // Непрозрачный
+        }
+      }
+    }
+
+    // 4. ЧАСТИЦЫ
+    for(let p of particles) {
+        const dx = p.x - player.x;
+        const dy = p.y - player.y;
+        const tX = invDet * (player.dirY*dx - player.dirX*dy);
+        const tY = invDet * (-player.planeY*dx + player.planeX*dy);
+        
+        if (tY > 0.1) {
+            const scrX = ((W/2) * (1 + tX/tY)) | 0;
+            const scrY = H/2 + (p.z - 0.5) * H / tY;
+            
+            if (scrX >= 0 && scrX < W && scrY >= 0 && scrY < H) {
+                if (tY < zbuffer[scrX]) {
+                    const i = (scrY * W + scrX) * 4;
+                    imgData.data[i] = 255; imgData.data[i+1] = 0; imgData.data[i+2] = 0;
+                }
+            }
+        }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+
+    // 5. ОРУЖИЕ
+    const bobY = Math.abs(player.vx) > 0 ? Math.sin(state.bob) * 3 : 0;
+    const cx = W / 2;
+    const baseY = H + 5 + bobY;
+
+    if (state.currentWeapon === 1) {
+        let handGrad = ctx.createLinearGradient(cx - 40, baseY - 40, cx + 40, baseY);
+        handGrad.addColorStop(0, '#3a4a5a'); handGrad.addColorStop(0.5, '#6a7a8a'); handGrad.addColorStop(1, '#3a4a5a');
+        ctx.fillStyle = handGrad;
+        ctx.beginPath(); ctx.moveTo(cx - 35, baseY); ctx.lineTo(cx - 20, baseY - 40); ctx.lineTo(cx - 10, baseY - 40); ctx.lineTo(cx - 20, baseY); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(cx + 35, baseY); ctx.lineTo(cx + 20, baseY - 40); ctx.lineTo(cx + 10, baseY - 40); ctx.lineTo(cx + 20, baseY); ctx.fill();
+
+        let gunGrad = ctx.createLinearGradient(cx - 12, baseY - 50, cx + 12, baseY - 10);
+        gunGrad.addColorStop(0, '#222'); gunGrad.addColorStop(0.3, '#888'); gunGrad.addColorStop(0.5, '#ddd'); gunGrad.addColorStop(1, '#111');
+        ctx.fillStyle = gunGrad;
+        ctx.beginPath(); ctx.moveTo(cx - 14, baseY - 10); ctx.lineTo(cx + 14, baseY - 10); ctx.lineTo(cx + 8, baseY - 55); ctx.lineTo(cx - 8, baseY - 55); ctx.fill();
+        ctx.fillStyle = '#aaa'; ctx.fillRect(cx - 2, baseY - 58, 4, 4);
+    } else {
+        let woodGrad = ctx.createLinearGradient(cx - 40, baseY, cx + 40, baseY - 60);
+        woodGrad.addColorStop(0, '#2a1505'); woodGrad.addColorStop(0.3, '#5a2a15'); woodGrad.addColorStop(1, '#1a0500');
+        ctx.fillStyle = woodGrad;
+        ctx.beginPath(); ctx.moveTo(cx - 35, baseY); ctx.lineTo(cx + 35, baseY); ctx.lineTo(cx + 25, baseY - 40); ctx.lineTo(cx - 25, baseY - 40); ctx.fill();
+
+        let metalCenter = ctx.createLinearGradient(cx - 15, baseY - 80, cx + 15, baseY - 80);
+        metalCenter.addColorStop(0, '#555'); metalCenter.addColorStop(0.5, '#bbb'); metalCenter.addColorStop(1, '#555');
+        ctx.fillStyle = metalCenter;
+        ctx.beginPath(); ctx.moveTo(cx - 15, baseY - 40); ctx.lineTo(cx + 15, baseY - 40); ctx.lineTo(cx + 10, baseY - 85); ctx.lineTo(cx - 10, baseY - 85); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillRect(cx - 5, baseY - 85, 4, 45);
+
+        let pumpGrad = ctx.createLinearGradient(cx - 20, baseY - 60, cx + 20, baseY - 30);
+        pumpGrad.addColorStop(0, '#3a1a05'); pumpGrad.addColorStop(0.5, '#6a3a15'); pumpGrad.addColorStop(1, '#3a1a05');
+        ctx.fillStyle = pumpGrad;
+        ctx.beginPath(); ctx.moveTo(cx - 22, baseY - 30); ctx.lineTo(cx + 22, baseY - 30); ctx.lineTo(cx + 18, baseY - 55); ctx.lineTo(cx - 18, baseY - 55); ctx.fill();
+        ctx.fillStyle = '#1a0500'; ctx.fillRect(cx - 18, baseY - 50, 36, 2); ctx.fillRect(cx - 20, baseY - 42, 40, 2); ctx.fillRect(cx - 19, baseY - 34, 38, 2);
+
+        let gloveGrad = ctx.createLinearGradient(cx - 50, baseY, cx - 20, baseY - 30);
+        gloveGrad.addColorStop(0, '#2a3a4a'); gloveGrad.addColorStop(0.5, '#5a6a7a'); gloveGrad.addColorStop(1, '#2a3a4a');
+        ctx.fillStyle = gloveGrad;
+        ctx.beginPath(); ctx.moveTo(cx - 45, baseY); ctx.lineTo(cx - 25, baseY - 10); ctx.lineTo(cx - 18, baseY - 45); ctx.lineTo(cx - 35, baseY - 40); ctx.fill();
+        ctx.fillStyle = '#1a2a3a'; ctx.fillRect(cx - 22, baseY - 45, 5, 12);
+
+        let gloveGradR = ctx.createLinearGradient(cx + 20, baseY, cx + 50, baseY - 30);
+        gloveGradR.addColorStop(0, '#2a3a4a'); gloveGradR.addColorStop(0.5, '#5a6a7a'); gloveGradR.addColorStop(1, '#2a3a4a');
+        ctx.fillStyle = gloveGradR;
+        ctx.beginPath(); ctx.moveTo(cx + 45, baseY); ctx.lineTo(cx + 25, baseY - 10); ctx.lineTo(cx + 18, baseY - 40); ctx.lineTo(cx + 35, baseY - 35); ctx.fill();
+
+        ctx.fillStyle = '#333'; ctx.fillRect(cx - 3, baseY - 90, 6, 5);
+        ctx.fillStyle = '#888'; ctx.fillRect(cx - 1, baseY - 88, 2, 2);
+    }
+
+    if (player.hitFlash > 0) {
+        const flashGrad = ctx.createRadialGradient(cx, baseY - 85, 5, cx, baseY - 85, 40);
+        flashGrad.addColorStop(0, '#ffffff'); flashGrad.addColorStop(0.3, '#ffffaa'); flashGrad.addColorStop(1, 'rgba(255, 100, 0, 0)');
+        ctx.fillStyle = flashGrad;
+        ctx.beginPath(); ctx.arc(cx, baseY - 85, 40, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 6. МИНИ-КАРТА
+    const mapX = 10;
+    const mapY = 10;
+    const scale = 2;
+    
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(mapX - 2, mapY - 2, MAP_W * scale + 4, MAP_H * scale + 4);
+
+    for(let y=0; y<MAP_H; y++) {
+        for(let x=0; x<MAP_W; x++) {
+            if (MAP[y][x] === 1) {
+                ctx.fillStyle = '#555';
+                ctx.fillRect(mapX + x*scale, mapY + y*scale, scale, scale);
+            }
+        }
+    }
+    ctx.fillStyle = '#0f0';
+    ctx.fillRect(mapX + player.x*scale - 1, mapY + player.y*scale - 1, 3, 3);
+    ctx.fillStyle = '#f00';
+    for(let e of enemies) {
+        ctx.fillRect(mapX + e.x*scale - 1, mapY + e.y*scale - 1, 3, 3);
+    }
+  }
+
+  // --- УПРАВЛЕНИЕ ---
+  window.addEventListener('keydown', e => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+    keys[e.code] = true;
+    if (e.code === 'Space') shoot();
+    if (e.code === 'Digit1') { state.currentWeapon = 1; }
+    if (e.code === 'Digit2') { state.currentWeapon = 2; }
+  });
+  window.addEventListener('keyup', e => keys[e.code] = false);
+
+  canvas.addEventListener('click', () => {
+    if (!state.running) return;
+    if (!document.pointerLockElement) canvas.requestPointerLock();
+    else shoot();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (document.pointerLockElement === canvas) rotate(e.movementX * 0.002);
+  });
+
+  // --- ЦИКЛ ---
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = Math.min((now - lastTime) / 1000, 0.05);
+    lastTime = now;
+    state.time += dt;
+
+    if (state.running && !state.gameOver) {
+      if (state.shootCd > 0) state.shootCd -= dt * 1000;
+      if (player.hitFlash > 0) { player.hitFlash -= dt; if (player.hitFlash <= 0) hitEnemy = null; }
+
+      if (keys['ArrowLeft']) rotate(-2.2 * dt);
+      if (keys['ArrowRight']) rotate(2.2 * dt);
+      const sp = 3.0 * dt;
+      let moved = false;
+      if (keys['KeyW'] || keys['ArrowUp']) { tryMove(player.dirX*sp, player.dirY*sp); moved = true; }
+      if (keys['KeyS'] || keys['ArrowDown']) { tryMove(-player.dirX*sp, -player.dirY*sp); moved = true; }
+      if (keys['KeyA']) { tryMove(-player.planeX*sp, -player.planeY*sp); moved = true; }
+      if (keys['KeyD']) { tryMove(player.planeX*sp, player.planeY*sp); moved = true; }
+      if (moved) state.bob += dt * 10;
+
+      for(let i = particles.length - 1; i >= 0; i--) {
+          let p = particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.z += p.vz * dt;
+          p.vz -= 5 * dt;
+          p.life -= dt;
+          if (p.life <= 0) particles.splice(i, 1);
+      }
+
+      for(let i = items.length - 1; i >= 0; i--) {
+          let it = items[i];
+          if (Math.hypot(player.x - it.x, player.y - it.y) < 0.6) {
+              player.hp = Math.min(100, player.hp + 25);
+              hpEl.textContent = Math.floor(player.hp) + '%';
+              items.splice(i, 1);
+              playSound('hit');
+          }
+      }
+
+      enemies.forEach(e => {
+        const dx = player.x - e.x, dy = player.y - e.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 6) {
+          const nx = dx/dist, ny = dy/dist;
+          const es = 1.0 * dt;
+          if (!isWall(e.x + nx*es, e.y)) e.x += nx*es;
+          if (!isWall(e.x, e.y + ny*es)) e.y += ny*es;
+        }
+        if (dist < 0.8) {
+          player.hp -= 20 * dt;
+          hpEl.textContent = Math.max(0, player.hp | 0) + '%';
+          
+          if (player.hp > 80) faceEl.textContent = '🙂';
+          else if (player.hp > 50) faceEl.textContent = '😐';
+          else if (player.hp > 20) faceEl.textContent = '😟';
+          else faceEl.textContent = '😫';
+
+          if (player.hp <= 0) {
+            state.gameOver = true; state.running = false;
+            overlay.classList.remove('hidden');
+            overlay.querySelector('h1').textContent = 'ТЫ ПОГИБ';
+            overlay.querySelector('p').innerHTML = 'Враги добрались до тебя.';
+            startBtn.textContent = 'ПОПРОБОВАТЬ СНОВА';
+          }
+        }
+      });
+
+      render();
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  // --- СТАРТ ---
+  function startGame() {
+    initAudio();
+    player.x = 2.5; player.y = 2.5;
+    player.dirX = 1; player.dirY = 0;
+    player.planeX = 0; player.planeY = 0.66;
+    player.hp = 100;
+    state.ammo = 50;
+    state.score = 0;
+    hpEl.textContent = '100%';
+    ammoEl.textContent = '50';
+    faceEl.textContent = '🙂';
+    hitEnemy = null;
+    bloodDecals = [];
+    particles = [];
+    state.time = 0;
+
+    enemies = [
+      { x: 8.5, y: 8.5, hp: 100 },
+      { x: 12.5, y: 4.5, hp: 100 },
+      { x: 5.5, y: 12.5, hp: 100 },
+      { x: 13.5, y: 12.5, hp: 100 }
+    ];
+    enemiesEl.textContent = enemies.length;
+
+    items = [
+      { x: 4.5, y: 4.5 },
+      { x: 12.5, y: 8.5 }
+    ];
+
+    state.running = true; state.gameOver = false; state.shootCd = 0;
+    overlay.classList.add('hidden');
+    crosshair.style.display = 'block';
+    canvas.requestPointerLock();
+    lastTime = performance.now();
+  }
+
+  startBtn.addEventListener('click', startGame);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
